@@ -10,7 +10,8 @@ def load_activity(path: str | Path) -> pd.DataFrame:
     missing = set(ACTIVITY_COLUMNS) - set(df.columns)
     if missing:
         raise ValueError(f"Faltan columnas de actividad: {sorted(missing)}")
-    df["ActivityDate"] = pd.to_datetime(df["ActivityDate"], errors="coerce", format="mixed").dt.normalize()
+    df["ActivityDate_source"] = df["ActivityDate"].astype("string")
+    df["ActivityDate"] = pd.to_datetime(df["ActivityDate_source"], errors="coerce", format="mixed").dt.normalize()
     if df["ActivityDate"].isna().any():
         raise ValueError("Hay fechas de actividad que no se pudieron interpretar.")
     return df
@@ -20,7 +21,8 @@ def load_sleep(path: str | Path) -> pd.DataFrame:
     missing = set(SLEEP_COLUMNS) - set(df.columns)
     if missing:
         raise ValueError(f"Faltan columnas de sueño: {sorted(missing)}")
-    df["SleepDay"] = pd.to_datetime(df["SleepDay"], errors="coerce", format="mixed").dt.normalize()
+    df["SleepDay_source"] = df["SleepDay"].astype("string")
+    df["SleepDay"] = pd.to_datetime(df["SleepDay_source"], errors="coerce", format="mixed").dt.normalize()
     if df["SleepDay"].isna().any():
         raise ValueError("Hay fechas de sueño que no se pudieron interpretar.")
     return df

@@ -1,8 +1,17 @@
-.venv/
+﻿.venv/
 __pycache__/
 .pytest_cache/
 .streamlit/secrets.toml
 *.py[cod]
+
+# Datos fuente y derivados: incluyen identificadores de participantes.
+data/original/*
+data/integrated/*
 data/processed/*
+
+# Los informes de texto sí son entregables versionables.
 outputs/*
 !outputs/.gitkeep
+!outputs/reports/
+outputs/reports/*
+!outputs/reports/*.md

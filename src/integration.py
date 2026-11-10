@@ -6,20 +6,37 @@ from .data_loader import load_activity, load_sleep
 class DuplicateKeyError(ValueError):
     """Las fuentes tienen mediciones diferentes para una misma clave."""
 
+    def __init__(self, message, activity_conflicts=None, sleep_conflicts=None, sleep_duplicates=None):
+        super().__init__(message)
+        self.activity_conflicts = activity_conflicts if activity_conflicts is not None else pd.DataFrame()
+        self.sleep_conflicts = sleep_conflicts if sleep_conflicts is not None else pd.DataFrame()
+        self.sleep_duplicates = sleep_duplicates if sleep_duplicates is not None else pd.DataFrame()
+
 def integrate(activity: pd.DataFrame, sleep: pd.DataFrame):
     a, s = activity.copy(), sleep.copy()
     a["Id"] = a["Id"].astype("string"); s["Id"] = s["Id"].astype("string")
+    if "ActivityDate_source" not in a:
+        a["ActivityDate_source"] = a["ActivityDate"].astype("string")
+    if "SleepDay_source" not in s:
+        s["SleepDay_source"] = s["SleepDay"].astype("string")
     a["Date"] = pd.to_datetime(a["ActivityDate"], format="mixed").dt.normalize()
     s["Date"] = pd.to_datetime(s["SleepDay"], format="mixed").dt.normalize()
-    exact_sleep = int(s.duplicated().sum())
-    exact_activity = int(a.duplicated().sum())
-    s = s.drop_duplicates().copy()  # solo duplicados exactos de sueño
+    activity_exact_columns = [c for c in a.columns if c not in {"ActivityDate", "Date"}]
+    sleep_exact_columns = [c for c in s.columns if c not in {"SleepDay", "Date"}]
+    exact_sleep_mask = s.duplicated(subset=sleep_exact_columns, keep="first")
+    exact_sleep_discarded = s.loc[exact_sleep_mask].copy()
+    exact_sleep = int(exact_sleep_mask.sum())
+    exact_activity = int(a.duplicated(subset=activity_exact_columns, keep="first").sum())
+    s = s.loc[~exact_sleep_mask].copy()  # solo filas exactamente repetidas en la fuente
     activity_keys = a.duplicated(["Id", "Date"], keep=False)
     sleep_keys = s.duplicated(["Id", "Date"], keep=False)
     conflicts_a = a.loc[activity_keys].sort_values(["Id", "Date"])
     conflicts_s = s.loc[sleep_keys].sort_values(["Id", "Date"])
     if activity_keys.any() or sleep_keys.any():
-        raise DuplicateKeyError("Claves Id-fecha repetidas con potenciales mediciones distintas; revisar informe de claves antes de integrar.")
+        raise DuplicateKeyError(
+            "Claves Id-fecha repetidas tras normalizar. Se conservaron las filas conflictivas para auditoría.",
+            conflicts_a, conflicts_s, exact_sleep_discarded,
+        )
     merged = a.merge(s, on=["Id", "Date"], how="inner", suffixes=("_activity", "_sleep"), validate="one_to_one")
     merged = merged.drop(columns=["ActivityDate", "SleepDay"])
     activity_without = a.loc[~a.set_index(["Id", "Date"]).index.isin(s.set_index(["Id", "Date"]).index)].copy()
@@ -36,7 +53,7 @@ def integrate(activity: pd.DataFrame, sleep: pd.DataFrame):
         ("Cobertura integración sobre sueño deduplicado (%)", round(100*len(merged)/max(len(s),1), 2)),
         ("Unicidad persona-día", bool(~merged.duplicated(["Id","Date"]).any())),
     ], columns=["Indicador", "Valor"])
-    return merged, activity_without, sleep_without, audit, conflicts_a, conflicts_s
+    return merged, activity_without, sleep_without, audit, conflicts_a, conflicts_s, exact_sleep_discarded
 
 def run_integration(activity_path: str | Path, sleep_path: str | Path, root: str | Path):
     root = Path(root); processed = root / "data" / "processed"; outputs = root / "outputs"
@@ -44,15 +61,14 @@ def run_integration(activity_path: str | Path, sleep_path: str | Path, root: str
     a, s = load_activity(activity_path), load_sleep(sleep_path)
     # Persist key-conflict details even if integration cannot continue.
     try:
-        merged, a0, s0, audit, ca, cs = integrate(a, s)
-    except DuplicateKeyError:
-        ca = a.loc[a.duplicated(["Id","ActivityDate"], keep=False)]
-        sd = s.drop_duplicates().copy(); sd["_date"] = sd.SleepDay
-        cs = sd.loc[sd.duplicated(["Id","_date"], keep=False)]
+        merged, a0, s0, audit, ca, cs, exact_sleep_discarded = integrate(a, s)
+    except DuplicateKeyError as exc:
         outputs.mkdir(parents=True, exist_ok=True)
         with pd.ExcelWriter(outputs / "integration_audit.xlsx", engine="openpyxl") as writer:
             pd.DataFrame({"Indicador":["Claves duplicadas conflictivas"],"Valor":["Integración detenida para evitar descartar mediciones"]}).to_excel(writer, sheet_name="Resumen", index=False)
-            ca.to_excel(writer, sheet_name="Claves actividad", index=False); cs.to_excel(writer, sheet_name="Claves sueño", index=False)
+            exc.activity_conflicts.to_excel(writer, sheet_name="Claves actividad", index=False)
+            exc.sleep_conflicts.to_excel(writer, sheet_name="Claves sueño", index=False)
+            exc.sleep_duplicates.to_excel(writer, sheet_name="Exactos sueño descartados", index=False)
         raise
     merged.to_csv(processed / "person_day_integrated.csv", index=False)
     merged.to_excel(processed / "person_day_integrated.xlsx", index=False)
@@ -67,10 +83,12 @@ def run_integration(activity_path: str | Path, sleep_path: str | Path, root: str
             if "Date" in ref:
                 ref["Date"] = pd.to_datetime(ref["Date"], errors="coerce").dt.normalize()
             if "Id" in ref: ref["Id"] = ref["Id"].astype("string")
-            common = [c for c in merged.columns if c in ref.columns]
+            source_date_columns = {"ActivityDate_source", "SleepDay_source"}
+            canonical = [c for c in merged.columns if c not in source_date_columns]
+            common = [c for c in canonical if c in ref.columns]
             left = merged[common].sort_values(["Id","Date"]).reset_index(drop=True)
             right = ref[common].sort_values(["Id","Date"]).reset_index(drop=True)
-            same_rows = len(left)==len(right) and len(common)==len(merged.columns) and left.astype("string").fillna("<NA>").equals(right.astype("string").fillna("<NA>"))
+            same_rows = len(left)==len(right) and len(common)==len(canonical) and left.astype("string").fillna("<NA>").equals(right.astype("string").fillna("<NA>"))
             reference_audit = pd.DataFrame([
                 {"Indicador":"Filas Excel de referencia","Valor":len(ref)},
                 {"Indicador":"Columnas esperadas presentes en Excel","Valor":len(common)==len(merged.columns)},
@@ -84,6 +102,7 @@ def run_integration(activity_path: str | Path, sleep_path: str | Path, root: str
         audit.to_excel(writer, sheet_name="Resumen", index=False)
         reference_audit.to_excel(writer, sheet_name="Verificación Excel", index=False)
         ca.to_excel(writer, sheet_name="Claves actividad", index=False); cs.to_excel(writer, sheet_name="Claves sueño", index=False)
+        exact_sleep_discarded.to_excel(writer, sheet_name="Exactos sueño descartados", index=False)
         a0.to_excel(writer, sheet_name="Actividad sin sueño", index=False); s0.to_excel(writer, sheet_name="Sueño sin actividad", index=False)
     return merged, audit
 

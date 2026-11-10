@@ -24,10 +24,15 @@ def prepare_features(df: pd.DataFrame, features: list[str], missing: str = "medi
     if outliers not in {"keep", "iqr", "winsorize"}:
         raise ValueError("Tratamiento extremo debe ser keep, iqr o winsorize.")
     bounds = {}
-    if outliers in {"iqr", "winsorize"}:
+    if outliers == "iqr":
         for col in features:
             q1, q3 = x[col].quantile([.25,.75]); spread=q3-q1
             bounds[col] = (float(q1-1.5*spread), float(q3+1.5*spread))
+            x[col] = x[col].clip(*bounds[col])
+    elif outliers == "winsorize":
+        for col in features:
+            low, high = x[col].quantile([.05,.95])
+            bounds[col] = (float(low), float(high))
             x[col] = x[col].clip(*bounds[col])
     scaler = StandardScaler(); scaled = scaler.fit_transform(x)
     scaled_df = pd.DataFrame(scaled, columns=features, index=x.index)
