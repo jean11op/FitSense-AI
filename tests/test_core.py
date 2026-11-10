@@ -10,10 +10,10 @@ from src.kmeans_model import fit_kmeans
 from src.dbscan_model import fit_dbscan
 from src.pca_model import fit_pca
 from src.evaluation import clustering_metrics, compare_labels
-from src.profiling import profile_clusters, kmeans_outlier_candidates
+from src.profiling import profile_clusters, profile_details, kmeans_outlier_candidates
 from src.kmeans_stability import assess_kmeans_stability
 from src.dbscan_stability import assess_dbscan_stability
-from src.model_comparison import compare_models, common_assigned_comparison
+from src.model_comparison import compare_models, common_assigned_comparison, individual_comparison
 from src.combined_models import fit_pca_kmeans, fit_pca_dbscan
 from src.result_tracking import (participant_mapping, pseudonymize_frame, preprocessing_fingerprint,
     result_fingerprint, register_result, result_matches, feature_export_frames)
@@ -99,7 +99,8 @@ def test_model_results_are_bound_to_configuration_and_pseudonyms():
     altered=preprocessing_fingerprint(frame.iloc[::-1],["x"],"median","keep")
     model_id=result_fingerprint(prep_id,"K-Means",{"k":2})
     result=register_result("model",[0,1],{"silhouette":.4},{"k":2},model_id)
-    assert result_matches(result,model_id,2) and not result_matches(result,altered,2)
+    changed_k=result_fingerprint(prep_id,"K-Means",{"k":3})
+    assert result_matches(result,model_id,2) and not result_matches(result,altered,2) and not result_matches(result,changed_k,2)
     assert result["configuration"]=={"k":2} and result["executed_at"]
 
 def test_scaled_export_has_pseudonyms_and_no_raw_ids():
@@ -122,6 +123,25 @@ def test_preprocessing_outlier_strategies_have_distinct_bounds():
     win=prepare_features(df,["x"],outliers="winsorize")
     assert iqr["bounds"]["x"]!=win["bounds"]["x"]
 
+def test_profile_details_are_data_driven_and_include_noise():
+    raw=pd.DataFrame({"TotalSteps":[100.,110.,900.,1000.],"VeryActiveMinutes":[0.,1.,30.,40.],
+        "FairlyActiveMinutes":[0.,0.,15.,20.],"LightlyActiveMinutes":[100.,110.,250.,260.],
+        "SedentaryMinutes":[1000.,950.,500.,450.],"TotalMinutesAsleep":[300.,320.,450.,470.]})
+    scaled=(raw-raw.mean())/raw.std(ddof=0)
+    summary,details,heatmap=profile_details(raw,scaled,[0,0,1,-1])
+    assert summary.observaciones.tolist()==[1,2,1]
+    assert summary.porcentaje.sum()==100 and summary.perfil_sugerido.nunique()==3
+    assert "ruido DBSCAN" in summary.loc[summary.cluster==-1,"perfil_sugerido"].iloc[0]
+    assert len(details)==len(summary)*raw.shape[1] and heatmap.shape==(3,raw.shape[1])
+
+def test_individual_comparison_always_lists_four_and_marks_pending():
+    X=np.array([[0.,0.],[.1,.1],[4.,4.],[4.1,4.2]])
+    _,labels=fit_kmeans(X,2)
+    table=individual_comparison(X,{"K-Means":labels},{"K-Means":{"k":2}})
+    assert table.modelo.tolist()==["K-Means","DBSCAN","PCA + K-Means","PCA + DBSCAN"]
+    assert table.estado.tolist()==["Ejecutado","Pendiente","Pendiente","Pendiente"]
+    assert "semillas" in table.loc[table.modelo=="PCA + K-Means","estabilidad"].iloc[0]
+
 def test_streamlit_views_model_actions_and_scaled_download():
     from streamlit.testing.v1 import AppTest
     app_path=Path(__file__).resolve().parents[1]/"app.py"
@@ -131,13 +151,26 @@ def test_streamlit_views_model_actions_and_scaled_download():
     for option in options:
         app.radio[0].set_value(option).run()
         assert not app.exception, (option,app.exception[0].message if app.exception else "")
-    for option,index in ((options[4],1),(options[5],1),(options[6],0),(options[7],0)):
+    for option in (options[4],options[5]):
         app.radio[0].set_value(option).run()
-        app.button[index].click().run()
+        app.button[0].click().run()
+        app.button[1].click().run()
+        assert not app.exception, (option,app.exception[0].message if app.exception else "")
+    for option in (options[6],options[7]):
+        app.radio[0].set_value(option).run()
+        app.button[0].click().run()
         assert not app.exception, (option,app.exception[0].message if app.exception else "")
     for option in (options[8],options[9]):
         app.radio[0].set_value(option).run()
         assert not app.exception, (option,app.exception[0].message if app.exception else "")
+    app.radio[0].set_value(options[4]).run()
+    app.slider(key="km_k").set_value(4).run()
+    app.radio[0].set_value(options[8]).run()
+    current=next(frame.value for frame in app.dataframe if "estado" in frame.value.columns)
+    states=current.set_index("modelo")["estado"].to_dict()
+    assert states["K-Means"]=="Pendiente"
+    assert states["DBSCAN"]=="Ejecutado" and states["PCA + DBSCAN"]=="Ejecutado"
+    assert not app.exception
     app.radio[0].set_value(options[3]).run()
     assert any(button.label=="Descargar matriz estandarizada" for button in app.get("download_button"))
     assert not app.exception
